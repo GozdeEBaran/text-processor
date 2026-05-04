@@ -1,11 +1,12 @@
+from typing import List, Literal, Optional
 from pydantic import BaseModel, field_validator
-from typing import List
 
 MAX_TEXT_LENGTH = 50_000
 
 
 class AnalyzeRequest(BaseModel):
     text: str
+    provider: Optional[Literal["anthropic", "openai"]] = None
 
     @field_validator("text")
     @classmethod
@@ -22,4 +23,5 @@ class AnalyzeResponse(BaseModel):
     summary: str
     action_items: List[str]
     model: str
+    provider: str
     input_length: int

@@ -1,14 +1,13 @@
-import time
 import logging
-from abc import ABC, abstractmethod
+import time
+
 import anthropic
 
-from config import MODEL_NAME, MAX_RETRIES, TIMEOUT_SECONDS, get_api_key
+from app.config import ANTHROPIC_MODEL, MAX_RETRIES, TIMEOUT_SECONDS, get_api_key
+from app.providers.base import AISchemaError, AIServiceError, BaseProvider
 
 logger = logging.getLogger(__name__)
 
-# Schema-constrained tool forces the model to return valid, typed JSON —
-# no prompt-only parsing, no json.loads, no markdown-fence stripping.
 ANALYSIS_TOOL = {
     "name": "analyze_text",
     "description": "Return a structured analysis of the provided text.",
@@ -28,21 +27,6 @@ ANALYSIS_TOOL = {
         "required": ["summary", "action_items"],
     },
 }
-
-
-class AIServiceError(Exception):
-    def __init__(self, message: str, status_code: int = 500):
-        super().__init__(message)
-        self.status_code = status_code
-
-
-class AISchemaError(AIServiceError):
-    pass
-
-
-class BaseProvider(ABC):
-    @abstractmethod
-    def analyze(self, text: str) -> dict: ...
 
 
 class AnthropicProvider(BaseProvider):
@@ -66,7 +50,7 @@ class AnthropicProvider(BaseProvider):
             start = time.monotonic()
             try:
                 message = self.client.messages.create(
-                    model=MODEL_NAME,
+                    model=ANTHROPIC_MODEL,
                     max_tokens=512,
                     tools=[ANALYSIS_TOOL],
                     tool_choice={"type": "tool", "name": "analyze_text"},
@@ -78,7 +62,7 @@ class AnthropicProvider(BaseProvider):
                 request_id = getattr(message, "_request_id", None) or message.id
                 logger.info(
                     "provider=anthropic model=%s request_id=%s elapsed_ms=%d attempt=%d",
-                    MODEL_NAME,
+                    ANTHROPIC_MODEL,
                     request_id,
                     elapsed_ms,
                     attempt,
@@ -109,10 +93,7 @@ class AnthropicProvider(BaseProvider):
                 last_error = AIServiceError(msg, status_code=status)
 
             except anthropic.APIStatusError as e:
-                logger.error(
-                    "provider=anthropic api_status=%d",
-                    e.status_code,
-                )
+                logger.error("provider=anthropic api_status=%d", e.status_code)
                 raise AIServiceError(
                     f"AI provider returned an error (status {e.status_code}).",
                     status_code=503,

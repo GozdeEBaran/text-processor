@@ -1,12 +1,13 @@
 import logging
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
-from models import AnalyzeRequest, AnalyzeResponse
-from ai_service import analyze_text, AIServiceError
-from config import MODEL_NAME
+from app.providers.base import AIServiceError
+from app.routes.analyze import router as analyze_router
+from app.routes.health import router as health_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -15,14 +16,12 @@ logging.basicConfig(
 
 app = FastAPI(
     title="Text Processor API",
-    description="Summarizes text and extracts action items using Claude.",
-    version="1.0.0",
+    description="Summarizes text and extracts action items using Claude or OpenAI.",
+    version="2.0.0",
 )
 
-
-@app.get("/healthz")
-def healthz():
-    return {"status": "ok"}
+app.include_router(health_router)
+app.include_router(analyze_router)
 
 
 @app.exception_handler(RequestValidationError)
@@ -36,15 +35,3 @@ async def validation_exception_handler(request: Request, exc: Exception):
 @app.exception_handler(AIServiceError)
 async def ai_service_error_handler(request: Request, exc: AIServiceError):
     return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)})
-
-
-@app.post("/analyze", response_model=AnalyzeResponse)
-def analyze(request: AnalyzeRequest):
-    result = analyze_text(request.text)
-
-    return AnalyzeResponse(
-        summary=result["summary"],
-        action_items=result["action_items"],
-        model=MODEL_NAME,
-        input_length=len(request.text),
-    )
