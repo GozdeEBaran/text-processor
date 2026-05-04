@@ -1,58 +1,94 @@
 # Text Processor API
 
-A FastAPI service that takes a block of text, sends it to Claude, and returns a summary + 3 action items as structured JSON.
+FastAPI service that takes a block of text and returns a summary plus 3 action items as JSON, backed by Claude or GPT-4o.
 
-## Setup
+## Run it
 
+With Docker:
 ```bash
-pip install -r requirements.txt
-cp .env.example .env # add your key
-uvicorn main:app --reload
+cp .env.example .env   # fill in your API key(s)
+docker compose up --build
 ```
 
-API runs at http://localhost:8000 — interactive docs at /docs.
+Without Docker:
+```bash
+pip install -r requirements.txt
+cp .env.example .env
+uvicorn app.main:app --reload
+```
+
+API is at `http://localhost:8000`, interactive docs at `/docs`.
 
 ## Usage
 
 ```bash
 curl -X POST http://localhost:8000/analyze \
- -H "Content-Type: application/json" \
- -d '{"text": "Your text here, must be at least 20 characters."}'
+  -H "Content-Type: application/json" \
+  -d '{"text": "Your text here, at least 20 characters."}'
+```
+
+To use OpenAI instead of Anthropic:
+```bash
+curl -X POST http://localhost:8000/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Your text here.", "provider": "openai"}'
 ```
 
 Response:
-
 ```json
 {
   "summary": "The text discusses...",
   "action_items": ["Do X", "Review Y", "Follow up on Z"],
   "model": "claude-sonnet-4-20250514",
+  "provider": "anthropic",
   "input_length": 67
 }
 ```
 
-## What I Built
+If `API_KEY` is set in `.env`, pass it on every request:
+```
+X-API-Key: your-key
+```
 
-FastAPI backend with a single POST /analyze endpoint. Pydantic handles request validation, the Anthropic SDK calls Claude, and the response comes back as typed JSON. Kept it intentionally simple, no database, no auth, just the core flow working cleanly. Used FastAPI since it's what I've been building with in production lately, felt like the right fit over Flask for the automatic docs and typed request handling.
+## Project structure
 
-## The Prompt
+```
+app/
+├── main.py                    # app setup, error handlers
+├── config.py                  # env vars, provider/model selection
+├── models/schemas.py          # request & response types
+├── providers/
+│   ├── base.py                # BaseProvider, shared error classes
+│   ├── anthropic_provider.py  # Claude via tool_use
+│   └── openai_provider.py     # GPT-4o via function calling
+├── routes/
+│   ├── analyze.py             # POST /analyze
+│   └── health.py              # GET /healthz
+├── services/ai_service.py     # calls the provider factory
+└── auth/dependencies.py       # X-API-Key guard
+tests/
+```
 
-I put the format instructions in the system prompt rather than the user message, and led with the constraint ("respond with ONLY valid JSON") before anything else. My first instinct was to describe the fields and trust the model — that didn't work well, kept getting loose formatting. Adding an explicit one-line example at the end of the prompt was what actually locked in the structure consistently.
+## What I built and why
 
-## What Didn't Work at First
+`POST /analyze` validates the input, picks a provider (from the request body or the `PROVIDER` env var), and returns structured JSON. Both providers use their tool/function-calling APIs rather than prompt parsing — the output schema is enforced at the API level, so there's no `json.loads` on raw text and no string manipulation to clean up the response.
 
-Two things bit me early:
+Input validation is Pydantic: 20 character minimum, 50,000 character maximum. Both limits are intentional. Too-short inputs produce meaningless output. No upper bound means a single request could push a lot of tokens through without the caller realizing it.
 
-First, the model kept returning markdown-wrapped JSON even with instructions not to, the ```json fences were showing up and breaking json.loads. Moving the "no markdown" line to the very top of the system prompt helped a lot. I also left a defensive strip in ai_service.py that removes fences if they still sneak through, costs nothing and protects against the model drifting between versions.
+Auth is opt-in. If `API_KEY` isn't in the environment, `/analyze` is open. Makes local dev easier without needing a workaround.
 
-Second, action_items was coming back with 2 or 4 items pretty often. Changing "three" to "exactly 3" (the numeral) and adding the example line fixed it. Not sure why the numeral works better but it does.
+I went with FastAPI over Flask because the automatic OpenAPI docs and native Pydantic integration actually matter when the whole point is a well-defined request/response contract. `/docs` reflecting the real types is useful, not just a checkbox.
 
-## What I'd Improve With More Time
+## What didn't work at first
 
-A few things I thought about but didn't build:
+The first version used a system prompt to get structured JSON from Claude. It worked most of the time — which isn't good enough when the next line is `json.loads`. Markdown fences would sneak through, action item counts would drift to 2 or 4, and formatting would vary between model versions.
 
-Async queue for heavy load - right now every request hits the Anthropic API directly and synchronously. At any real scale that would blow through rate limits fast. I'd push requests into SQS and have the client poll a /result/{job_id} endpoint. I used this pattern at Goldenfinch for an async AI pipeline and it holds up well.
+Switching to tool_use (Anthropic) and function calling (OpenAI) fixed all of it. The schema is declared once, the model is forced to match it, and there's nothing left to parse or clean up.
 
-Streaming — Claude supports streamed responses and FastAPI handles it natively with StreamingResponse. For longer inputs the latency would feel much better to callers.
+## What I'd add with more time
 
-Input chunking — the current approach sends the full text in one shot. For anything long I'd chunk it, summarize each piece, then summarize the summaries. Fine for this task size, would matter quickly in production.
+**Async job queue** — every request is currently synchronous and hits the provider API directly. Under any real load that's a problem: rate limits stack up, clients sit waiting on slow responses, and there's no clean retry path. The right fix is an SQS-backed queue with a `GET /result/{job_id}` polling endpoint. I've used this pattern for async AI pipelines before and it holds up well.
+
+**Streaming** — both providers support streamed responses and FastAPI handles it natively with `StreamingResponse`. For longer inputs the perceived latency is much better on the client side.
+
+**Input chunking** — right now the full text goes in one API call. For anything long that hits context limits fast. The standard approach is chunk, summarize each piece, then summarize the summaries.
